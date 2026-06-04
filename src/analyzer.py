@@ -7,83 +7,20 @@
 - lhb_seats_*.csv：营业部买卖明细（fetcher fetch_lhb_seats）
 """
 import pandas as pd
-import glob
 from datetime import datetime
 
-from src.config import DATA_DIR, FAMOUS_SEATS
+from src.config import FAMOUS_SEATS
+from src.logger import get_logger
+from src.utils import (
+    load_latest_data,
+    load_multi_day_data,
+    _get_seat_col,
+    _get_code_col,
+    _get_name_col,
+    _safe_float,
+)
 
-
-def load_latest_data(prefix: str = "lhb_detail") -> tuple:
-    """
-    加载最新日期的数据文件
-
-    Args:
-        prefix: 文件名前缀 (lhb_detail 或 lhb_seats)
-
-    Returns:
-        (DataFrame, date_str)
-    """
-    pattern = str(DATA_DIR / f"{prefix}_*.csv")
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise FileNotFoundError(
-            f"未找到 {prefix} 数据文件，请先运行: python -m src.main fetch"
-        )
-    latest = files[-1]
-    date_str = latest.split("_")[-1].replace(".csv", "")
-    print(f"[加载] {latest} (日期: {date_str})")
-    return pd.read_csv(latest, encoding="utf-8-sig"), date_str
-
-
-def load_multi_day_data(prefix: str = "lhb_detail", days: int = 5) -> pd.DataFrame:
-    """
-    加载最近 N 天的数据
-
-    Args:
-        prefix: 文件名前缀
-        days: 天数
-
-    Returns:
-        合并后的 DataFrame
-    """
-    pattern = str(DATA_DIR / f"{prefix}_*.csv")
-    files = sorted(glob.glob(pattern))[-days:]
-    if not files:
-        raise FileNotFoundError("未找到数据文件")
-
-    dfs = []
-    for f in files:
-        df = pd.read_csv(f, encoding="utf-8-sig")
-        df["date"] = f.split("_")[-1].replace(".csv", "")
-        dfs.append(df)
-
-    result = pd.concat(dfs, ignore_index=True)
-    print(f"[加载] {len(files)} 天数据，共 {len(result)} 条")
-    return result
-
-
-def _get_seat_col(df: pd.DataFrame) -> str:
-    """自动识别营业部名称列"""
-    for c in ["交易营业部名称", "营业部名称", "营业部"]:
-        if c in df.columns:
-            return c
-    return None
-
-
-def _get_code_col(df: pd.DataFrame) -> str:
-    """自动识别代码列"""
-    for c in ["代码", "股票代码"]:
-        if c in df.columns:
-            return c
-    return df.columns[0]
-
-
-def _get_name_col(df: pd.DataFrame) -> str:
-    """自动识别名称列"""
-    for c in ["名称", "股票名称"]:
-        if c in df.columns:
-            return c
-    return df.columns[1] if len(df.columns) > 1 else None
+logger = get_logger(__name__)
 
 
 def analyze_famous_seats(seats_df: pd.DataFrame) -> dict:
@@ -279,18 +216,6 @@ def run(date_str: str = None):
         seats_df = None
 
     generate_report(detail_df, seats_df, date_str or loaded_date)
-
-
-def _safe_float(val) -> float:
-    """安全转换为 float"""
-    try:
-        if isinstance(val, (int, float)):
-            return float(val)
-        if isinstance(val, str):
-            return float(val.replace(",", "").replace(" ", ""))
-        return 0.0
-    except (ValueError, TypeError):
-        return 0.0
 
 
 if __name__ == "__main__":

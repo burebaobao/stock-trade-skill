@@ -7,11 +7,9 @@
 - lhb_seats：营业部买卖明细（游资、机构识别）
 """
 import pandas as pd
-import glob
 from datetime import datetime
 
 from src.config import (
-    DATA_DIR,
     SCORING,
     SIGNAL_THRESHOLD,
     TOP_N,
@@ -20,19 +18,22 @@ from src.config import (
     HOLD_DAYS,
     FAMOUS_SEATS,
 )
-from src.analyzer import (
+from src.logger import get_logger
+from src.utils import (
     load_latest_data,
     load_multi_day_data,
     _get_seat_col,
     _get_code_col,
     _get_name_col,
-    analyze_famous_seats,
-    analyze_institutions,
     _safe_float,
+    check_consecutive_listed,
 )
+from src.analyzer import analyze_institutions
+
+logger = get_logger(__name__)
 
 
-def calculate_score(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None) -> pd.DataFrame:
+def calculate_score(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, multi_day_df: pd.DataFrame = None) -> pd.DataFrame:
     """
     计算每只股票的综合得分
 
@@ -46,6 +47,7 @@ def calculate_score(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None) -> p
     Args:
         detail_df: 个股详情数据
         seats_df: 营业部明细数据（可选，用于游资/机构识别）
+        multi_day_df: 多日数据（可选，用于判断连续上榜）
 
     Returns:
         DataFrame: 含 score 列，按得分降序
@@ -84,15 +86,18 @@ def calculate_score(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None) -> p
             seat_col = _get_seat_col(seats_df)
             if seat_col:
                 stock_seats = seats_df[seats_df[code_col] == code]
+                # 去重游资，避免重复加分
+                added_nicknames = set()
                 for keyword, info in FAMOUS_SEATS.items():
                     matched = stock_seats[
                         stock_seats[seat_col].astype(str).str.contains(keyword, na=False)
                     ]
                     buy_amounts = matched["买入金额"].apply(_safe_float)
                     buy_matched = matched[buy_amounts > 0]
-                    if not buy_matched.empty:
+                    if not buy_matched.empty and info["nickname"] not in added_nicknames:
                         score += SCORING["famous_buy"]
                         reasons.append(f"{info['nickname']}买入")
+                        added_nicknames.add(info["nickname"])
                         if info["win_rate"] > 0.6:
                             score += SCORING["high_win_rate"]
                             reasons.append(f"{info['nickname']}高胜率")
@@ -109,8 +114,10 @@ def calculate_score(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None) -> p
             score += SCORING["net_ratio_high"]
             reasons.append(f"净占比{row['净买入占比']:.0f}%")
 
-        # 4. 连续上榜（需要多日数据，在 run() 中处理）
-        # 这里先留空，由外部传入标记
+        # 4. 连续上榜
+        if multi_day_df is not None and check_consecutive_listed(code, multi_day_df, code_col):
+            score += SCORING["consecutive"]
+            reasons.append("连续上榜")
 
         result.at[idx, "score"] = score
         result.at[idx, "reasons"] = "、".join(reasons) if reasons else "无明显信号"
@@ -139,10 +146,16 @@ def get_risk_warnings(seats_df: pd.DataFrame) -> list:
     if seat_col is None:
         return warnings
 
+    # 去重游资
+    processed_nicknames = set()
     for keyword, info in FAMOUS_SEATS.items():
+        if info["nickname"] in processed_nicknames:
+            continue
         mask = seats_df[seat_col].astype(str).str.contains(keyword, na=False)
-        sells = seats_df[mask & (_safe_float(seats_df.get("卖出金额", 0)) > 0)]
-
+        # 正确过滤卖出记录
+        sells = seats_df[mask].copy()
+        sells = sells[sells["卖出金额"].apply(_safe_float) > 0]
+        
         for _, s in sells.head(3).iterrows():
             code = s.get(code_col, "")
             name = s.get(name_col, "")
@@ -150,17 +163,19 @@ def get_risk_warnings(seats_df: pd.DataFrame) -> list:
             warnings.append(
                 f"{code} {name}：{info['nickname']}卖出{amount / 1e4:.0f}万，建议关注"
             )
+        processed_nicknames.add(info["nickname"])
 
     return warnings
 
 
-def generate_signals(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, date_str: str = None):
+def generate_signals(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, multi_day_df: pd.DataFrame = None, date_str: str = None):
     """
     生成完整的交易信号报告
 
     Args:
         detail_df: 个股详情数据
         seats_df: 营业部明细数据
+        multi_day_df: 多日数据
         date_str: 日期
     """
     if date_str is None:
@@ -171,7 +186,7 @@ def generate_signals(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, dat
     print(f"{'=' * 60}")
 
     # 计算得分
-    scores = calculate_score(detail_df, seats_df)
+    scores = calculate_score(detail_df, seats_df, multi_day_df)
 
     # 买入推荐
     qualified = scores[scores["score"] >= SIGNAL_THRESHOLD]
@@ -216,8 +231,11 @@ def generate_signals(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, dat
 
 def run(days: int = 5):
     """一键执行信号生成"""
-    # 加载个股详情
-    detail_df = load_multi_day_data("lhb_detail", days=days)
+    # 加载多日数据用于连续上榜判断
+    multi_day_df = load_multi_day_data("lhb_detail", days=days)
+    
+    # 加载最新一天的数据用于主要分析
+    latest_detail_df, loaded_date = load_latest_data("lhb_detail")
 
     # 尝试加载营业部明细
     try:
@@ -225,7 +243,7 @@ def run(days: int = 5):
     except FileNotFoundError:
         seats_df = None
 
-    return generate_signals(detail_df, seats_df)
+    return generate_signals(latest_detail_df, seats_df, multi_day_df, loaded_date)
 
 
 if __name__ == "__main__":

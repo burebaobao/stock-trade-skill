@@ -9,31 +9,15 @@
 """
 import akshare as ak
 import pandas as pd
-from datetime import datetime, timedelta
 
 from src.config import DATA_DIR
+from src.logger import get_logger, retry
+from src.utils import get_recent_trade_date, save_data
+
+logger = get_logger(__name__)
 
 
-def get_recent_trade_date(date_str: str = None) -> str:
-    """
-    获取最近交易日日期字符串 (YYYYMMDD)
-
-    Args:
-        date_str: 指定日期，为空则自动取最近交易日
-
-    Returns:
-        日期字符串，格式 YYYYMMDD
-    """
-    if date_str:
-        return date_str.replace("-", "")
-
-    today = datetime.now()
-    weekday = today.weekday()
-    if weekday >= 5:
-        today = today - timedelta(days=weekday - 4)
-    return today.strftime("%Y%m%d")
-
-
+@retry(max_attempts=3, delay=2, logger=logger)
 def fetch_lhb_detail(date_str: str = None) -> pd.DataFrame:
     """
     获取龙虎榜个股上榜详情（东方财富）
@@ -49,19 +33,17 @@ def fetch_lhb_detail(date_str: str = None) -> pd.DataFrame:
     """
     date_str = get_recent_trade_date(date_str)
 
-    try:
-        df = ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
-        if df is None or df.empty:
-            print(f"[警告] {date_str} 无龙虎榜数据")
-            return pd.DataFrame()
-
-        df.columns = [c.strip() for c in df.columns]
-        return df
-    except Exception as e:
-        print(f"[错误] 获取龙虎榜数据失败: {e}")
+    df = ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
+    if df is None or df.empty:
+        logger.warning(f"{date_str} 无龙虎榜数据")
         return pd.DataFrame()
 
+    df.columns = [c.strip() for c in df.columns]
+    logger.info(f"成功获取龙虎榜详情: {len(df)} 条记录")
+    return df
 
+
+@retry(max_attempts=3, delay=2, logger=logger)
 def fetch_lhb_seats(date_str: str = None) -> pd.DataFrame:
     """
     获取上榜股票的营业部买卖明细
@@ -97,32 +79,16 @@ def fetch_lhb_seats(date_str: str = None) -> pd.DataFrame:
                     seat_df["代码"] = code
                     seat_df["名称"] = name
                     all_seats.append(seat_df)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"获取 {code} {flag} 营业部数据失败: {e}")
                 continue
 
     if not all_seats:
         return pd.DataFrame()
 
     result = pd.concat(all_seats, ignore_index=True)
+    logger.info(f"成功获取营业部明细: {len(result)} 条记录")
     return result
-
-
-def save_data(df: pd.DataFrame, date_str: str, prefix: str = "lhb") -> str:
-    """
-    保存 DataFrame 到 CSV
-
-    Args:
-        df: 数据
-        date_str: 日期 YYYYMMDD
-        prefix: 文件名前缀
-
-    Returns:
-        保存的文件路径
-    """
-    filepath = DATA_DIR / f"{prefix}_{date_str}.csv"
-    df.to_csv(filepath, index=False, encoding="utf-8-sig")
-    print(f"[保存] {filepath}")
-    return str(filepath)
 
 
 def print_summary(df: pd.DataFrame, date_str: str):
@@ -166,7 +132,7 @@ def run(date_str: str = None):
         date_str: 日期 YYYYMMDD，默认最近交易日
     """
     date_str = get_recent_trade_date(date_str)
-    print(f"\n>>> 正在获取 {date_str} 龙虎榜数据...\n")
+    logger.info(f"正在获取 {date_str} 龙虎榜数据...")
 
     # 获取个股详情
     df_detail = fetch_lhb_detail(date_str)
@@ -175,14 +141,14 @@ def run(date_str: str = None):
         print_summary(df_detail, date_str)
 
     # 获取营业部买卖明细
-    print(">>> 正在获取营业部买卖明细...\n")
+    logger.info("正在获取营业部买卖明细...")
     df_seats = fetch_lhb_seats(date_str)
     if not df_seats.empty:
         save_data(df_seats, date_str, prefix="lhb_seats")
         print(f"\n营业部买卖明细: {len(df_seats)} 条")
 
     if df_detail.empty and df_seats.empty:
-        print("[提示] 未获取到任何数据，可能是非交易日或接口变动")
+        logger.warning("未获取到任何数据，可能是非交易日或接口变动")
 
     return df_detail, df_seats
 
