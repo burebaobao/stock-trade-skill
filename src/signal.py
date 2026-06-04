@@ -206,6 +206,18 @@ def generate_signals(detail_df: pd.DataFrame, seats_df: pd.DataFrame = None, mul
                 f"{i:<4} {row[code_col]:<8} {row[name_col]:<10} "
                 f"{row['score']:<6.0f} {row['reasons']}"
             )
+    
+    # 显示得分前 10 名（即使不满足阈值）
+    print(f"\n【得分前 10 名】（包含未达阈值）")
+    print(f"{'排名':<4} {'代码':<8} {'名称':<10} {'得分':<6} {'理由'}")
+    print("-" * 60)
+    code_col = _get_code_col(detail_df)
+    name_col = _get_name_col(detail_df)
+    for i, (_, row) in enumerate(scores.head(10).iterrows(), 1):
+        print(
+            f"{i:<4} {row[code_col]:<8} {row[name_col]:<10} "
+            f"{row['score']:<6.0f} {row['reasons']}"
+        )
 
     # 风险提示
     print(f"\n【持仓风险提示】")
