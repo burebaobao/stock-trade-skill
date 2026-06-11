@@ -9,12 +9,50 @@
 """
 import akshare as ak
 import pandas as pd
+from datetime import datetime, timedelta
 
 from src.config import DATA_DIR
 from src.logger import get_logger, retry
-from src.utils import get_recent_trade_date, save_data
+from src.utils import save_data
 
 logger = get_logger(__name__)
+
+
+def _find_latest_trade_date() -> str:
+    """
+    通过范围查询找到最新有数据的交易日
+
+    Returns:
+        日期字符串 YYYYMMDD
+    """
+    today = datetime.now()
+    # 向前查最近30天的数据
+    start = (today - timedelta(days=30)).strftime("%Y%m%d")
+    end = today.strftime("%Y%m%d")
+
+    try:
+        df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
+        if df is None or df.empty:
+            # 如果近期无数据，扩大范围到最近180天
+            start = (today - timedelta(days=180)).strftime("%Y%m%d")
+            df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
+        if df is not None and not df.empty and "上榜日" in df.columns:
+            dates = sorted(df["上榜日"].unique())
+            latest = dates[-1]
+            if isinstance(latest, str):
+                date_str = latest.replace("-", "")
+            else:
+                date_str = latest.strftime("%Y%m%d")
+            logger.info(f"最新可用交易日: {date_str}")
+            return date_str
+    except Exception as e:
+        logger.warning(f"查找最新交易日失败: {e}")
+
+    # 回退：取最近一个工作日
+    d = today
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y%m%d")
 
 
 @retry(max_attempts=3, delay=2, logger=logger)
@@ -31,15 +69,36 @@ def fetch_lhb_detail(date_str: str = None) -> pd.DataFrame:
     Returns:
         DataFrame
     """
-    date_str = get_recent_trade_date(date_str)
+    if date_str is None:
+        date_str = _find_latest_trade_date()
+    else:
+        date_str = str(date_str).replace("-", "")
 
-    df = ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
+    # 用范围查询（前后1天）避免单日空数据导致失败
+    d = datetime.strptime(date_str, "%Y%m%d")
+    start = (d - timedelta(days=1)).strftime("%Y%m%d")
+    end = (d + timedelta(days=1)).strftime("%Y%m%d")
+
+    df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
     if df is None or df.empty:
-        logger.warning(f"{date_str} 无龙虎榜数据")
+        logger.warning(f"{date_str} 附近无龙虎榜数据")
         return pd.DataFrame()
 
     df.columns = [c.strip() for c in df.columns]
-    logger.info(f"成功获取龙虎榜详情: {len(df)} 条记录")
+
+    # 过滤到目标日期
+    if "上榜日" in df.columns:
+        target_dates = [date_str, d.strftime("%Y-%m-%d")]
+        mask = df["上榜日"].astype(str).str.replace("-", "").isin(
+            [x.replace("-", "") for x in target_dates]
+        )
+        df = df[mask].reset_index(drop=True)
+
+    if df.empty:
+        logger.warning(f"{date_str} 无龙虎榜数据")
+        return pd.DataFrame()
+
+    logger.info(f"成功获取龙虎榜详情 ({date_str}): {len(df)} 条记录")
     return df
 
 
@@ -56,7 +115,10 @@ def fetch_lhb_seats(date_str: str = None) -> pd.DataFrame:
     Returns:
         DataFrame，列：代码、名称、营业部名称、买入金额、卖出金额、净额、类型
     """
-    date_str = get_recent_trade_date(date_str)
+    if date_str is None:
+        date_str = _find_latest_trade_date()
+    else:
+        date_str = str(date_str).replace("-", "")
 
     # 先获取当日上榜股票列表
     detail_df = fetch_lhb_detail(date_str)
@@ -131,7 +193,10 @@ def run(date_str: str = None):
     Args:
         date_str: 日期 YYYYMMDD，默认最近交易日
     """
-    date_str = get_recent_trade_date(date_str)
+    if date_str is None:
+        date_str = _find_latest_trade_date()
+    else:
+        date_str = str(date_str).replace("-", "")
     logger.info(f"正在获取 {date_str} 龙虎榜数据...")
 
     # 获取个股详情
